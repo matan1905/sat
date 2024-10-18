@@ -1,32 +1,17 @@
 fs = require('fs')
 
 function main(){
-    const file = fs.readFileSync(__dirname+'/'+process.argv[2]+'.dimacs').toString()
+
+    const fileName = process.argv[2].endsWith('.dimacs') ? process.argv[2] : process.argv[2]+'.dimacs'
+    const file = fs.readFileSync(__dirname+'/'+fileName).toString()
     let clauses = (file).split('\n').map(x=>x.split(/\s+/).sort((a,b)=>{
         return a.replace('-','').localeCompare(b.replace('-',''))
     }).slice(1))
 
-    // clauses = reOrderByImpact(clauses)
-    // console.log(clauseXorEqualsTheirCount(clauses))
-    // console.log(clauses)
-    // solveByAddingInformation(clauses);
-    // console.log(optimize(clauses).map(c=>c.join(' ')).sort())
-    // console.log(createClauseThatIsNotInClauses(clauses))
-    // clauses = optimize(clauses)
-    // console.log(VarOrVarNot(VarOrVarNot(clauses)));
-    let i = 0
-    while (clauses.length<50_000_000) {
-        clauses = VarOrVarNot(clauses)
-        // // clauses = removeRedundantClauses(clauses)
-        clauses = optimize(clauses)
-        i++;
-        console.log(i,'/',25180,' - ',clauses.length)
-        if(clauses.length===0) return console.log('SAT')
-    }
-    // console.log(clausesToDimacs(clauses.sort((a,b)=>{
-    //     a.map(v=>Number(clean(v))).sort().join(' ').localeCompare(b.map(v=>Number(clean(v))).sort().join(' '))
-    // })))
-
+    console.log(clauses.length)
+    clauses = optimize(clauses)
+    console.log(clauses.length)
+    // console.log(clausesToDimacs((clauses)))
 }
 
 
@@ -406,7 +391,9 @@ function not(v){
     if(v.startsWith('-')) return v.substr(1)
     else return '-'+v;
 }
-
+function isNeg(literal) {
+    return literal.startsWith('-');
+}
 
 function sign(v){
     if(v.startsWith('-')) return '-'
@@ -427,6 +414,10 @@ function removeVariable(clause,variable){
 
 function containsVariable(clause,variable){
     return clause.find(v=>clean(v)===clean(variable))!==undefined
+}
+
+function containsVariableWithSign(clause, variable){
+    return clause.find(v=>v===variable) !== undefined
 }
 
 function setVariable(clauses,variable, value){
@@ -451,15 +442,44 @@ function setVariable(clauses,variable, value){
     return newClauses;
 }
 
+function replaceVariable(clauses,variable, replacement, flip){
+    // replace a variable with another variable, and optionally flip it
+    const newClauses = []
+    clauses.forEach(clause=>{
+        if(!containsVariable(clause,variable)){
+            newClauses.push(clause)
+            return
+        }
+
+        const newClause = clause.map(v=>{
+            if(clean(v)===clean(variable)){
+                const replaced = sign(v)+clean(replacement)
+                return flip ? not(replaced) : replaced
+            }
+            return v
+        })
+        // check for [-a ... a]
+        if(newClause.find(v=>v===replacement) && newClause.find(v=>v===not(replacement))){
+            return
+        }
+        // remove duplicates
+        newClauses.push(newClause.filter((v,i)=>newClause.indexOf(v)===i))
+    })
+
+    return newClauses;
+
+}
+
 function optimize(clauses){
     let dirty= true;
     while(dirty){
+        console.log(clauses.length)
         dirty = false
         let simpleVars = {} // vars that are only true or only false
         let notSimpleVars = {} // vars that are both true and false
         for (let clause of clauses) {
+            // if a clause is only one variable, set it
             if(clause.length===1){
-                // console.log('optimizing',clauses,clause,variableValue(clause[0]))
                 clauses = setVariable(clauses.filter(c=>c!==clause),clause[0],variableValue(clause[0]))
                 dirty = true
                 break
@@ -485,8 +505,17 @@ function optimize(clauses){
         if(cleanedClauses.length!==clauses.length){
             dirty = true
             clauses = cleanedClauses
-            // console.log('cleaned',clauses)
+            // find any empty clauses
+
+            continue;
         }
+        const twoVarOptimizedClauses = optimizeTwoVariableCases(clauses)
+        if(twoVarOptimizedClauses.length!==clauses.length){
+            dirty = true
+            clauses = twoVarOptimizedClauses
+            continue;
+        }
+
     }
     // remove duplicates
     return Object.keys(clauses.reduce((acc,clause)=>{
@@ -494,25 +523,254 @@ function optimize(clauses){
         return acc
     },{})).map(x=>x.split(' '))
 }
+
+function optimizeTwoVariableCases(clauses) {
+    // Step 1: Collect all variables and their literals
+    const variables = new Set();
+    clauses.forEach(clause => {
+        if (clause.length === 2) {
+            clause.forEach(lit => {
+                variables.add(clean(lit));
+            });
+        }
+    });
+
+    // Mapping from variable to index
+    let index = 0;
+    const varToIndex = {};
+    const indexToVar = {};
+    variables.forEach(variable => {
+        varToIndex[variable] = index++;
+        indexToVar[index - 1] = variable;
+    });
+    const numVars = variables.size;
+
+    // Step 2: Build the implication graph
+    const graph = [];
+    for (let i = 0; i < 2 * numVars; i++) {
+        graph.push([]);
+    }
+
+    // Helper functions
+    function varIndex(varName, isNeg) {
+        // Returns index in the graph for variable or its negation
+        return varToIndex[varName] * 2 + (isNeg ? 1 : 0);
+    }
+
+    function addImplication(fromVar, fromNeg, toVar, toNeg) {
+        const fromIdx = varIndex(fromVar, fromNeg);
+        const toIdx = varIndex(toVar, toNeg);
+        graph[fromIdx].push(toIdx);
+    }
+
+    // Step 3: Add implications based on clauses
+    clauses.forEach(clause => {
+        if (clause.length === 2) {
+            const [litA, litB] = clause;
+            const aVar = clean(litA);
+            const bVar = clean(litB);
+            const aNeg = isNeg(litA);
+            const bNeg = isNeg(litB);
+
+            // For clause (a ∨ b), add implications: ¬a ⇒ b and ¬b ⇒ a
+            addImplication(aVar, !aNeg, bVar, bNeg);
+            addImplication(bVar, !bNeg, aVar, aNeg);
+        }
+    });
+
+    // Step 4: Find SCCs using Tarjan's Algorithm
+    const indexMap = {};
+    const lowLink = {};
+    const indexCounter = { value: 0 };
+    const onStack = {};
+    const stack = [];
+    const sccs = [];
+    const sccMap = {};
+
+    function strongConnect(v) {
+        indexMap[v] = indexCounter.value;
+        lowLink[v] = indexCounter.value;
+        indexCounter.value++;
+        stack.push(v);
+        onStack[v] = true;
+
+        graph[v].forEach(w => {
+            if (indexMap[w] === undefined) {
+                strongConnect(w);
+                lowLink[v] = Math.min(lowLink[v], lowLink[w]);
+            } else if (onStack[w]) {
+                lowLink[v] = Math.min(lowLink[v], indexMap[w]);
+            }
+        });
+
+        if (lowLink[v] === indexMap[v]) {
+            const scc = [];
+            let w;
+            do {
+                w = stack.pop();
+                onStack[w] = false;
+                scc.push(w);
+                sccMap[w] = sccs.length;
+            } while (w !== v);
+            sccs.push(scc);
+        }
+    }
+
+    for (let v = 0; v < graph.length; v++) {
+        if (indexMap[v] === undefined) {
+            strongConnect(v);
+        }
+    }
+
+    // Step 5: Check for unsatisfiability
+    for (let i = 0; i < numVars; i++) {
+        const varIdx = i * 2;
+        const negVarIdx = varIdx + 1;
+        if (sccMap[varIdx] === sccMap[negVarIdx]) {
+            console.log('Unsatisfiable due to variable:', indexToVar[i]);
+            return [true, 'Unsatisfiable'];
+        }
+    }
+
+    // Step 6: Assign variables based on SCCs
+    const assignment = {};
+    const sccValues = {};
+    // Process SCCs in reverse topological order
+    const sccOrder = sccs.slice().reverse();
+
+    sccOrder.forEach(scc => {
+        scc.forEach(node => {
+            const varIdx = Math.floor(node / 2);
+            const isNeg = node % 2 === 1;
+            const varName = indexToVar[varIdx];
+            if (assignment[varName] === undefined) {
+                assignment[varName] = !isNeg;
+            }
+        });
+    });
+
+    // Step 7: Build variable equivalence classes
+    const parent = {};
+    function find(u) {
+        if (parent[u] === undefined) {
+            parent[u] = u;
+        }
+        if (parent[u] !== u) {
+            parent[u] = find(parent[u]);
+        }
+        return parent[u];
+    }
+
+    function union(u, v) {
+        const pu = find(u);
+        const pv = find(v);
+        if (pu !== pv) {
+            parent[pu] = pv;
+        }
+    }
+
+    // Variables in the same SCC are equivalent
+    sccs.forEach(scc => {
+        const varsInScc = new Set();
+        scc.forEach(node => {
+            const varIdx = Math.floor(node / 2);
+            const isNeg = node % 2 === 1;
+            const varName = indexToVar[varIdx];
+            const lit = isNeg ? '-' + varName : varName;
+            varsInScc.add(lit);
+        });
+        const varsArray = Array.from(varsInScc);
+        for (let i = 1; i < varsArray.length; i++) {
+            union(varsArray[0], varsArray[i]);
+        }
+    });
+
+    // Step 8: Prepare replacements
+    const replacements = {};
+    Object.keys(parent).forEach(lit => {
+        const root = find(lit);
+        replacements[lit] = root;
+    });
+
+    // Step 9: Replace variables in clauses
+    const newClauses = [];
+    clauses.forEach(clause => {
+        const newClause = clause.map(lit => {
+            const litClean = isNeg(lit) ? '-' + clean(lit) : clean(lit);
+            const replaced = replacements[litClean] || litClean;
+            return replaced.startsWith('-') ? '-' + clean(replaced) : clean(replaced);
+        });
+
+        // Remove duplicates
+        const uniqueClause = Array.from(new Set(newClause));
+        // Remove tautologies
+        const varsInClause = uniqueClause.map(clean);
+        if (new Set(varsInClause).size !== uniqueClause.length) {
+            // Clause is a tautology; skip it
+            return;
+        }
+        newClauses.push(uniqueClause);
+    });
+    return newClauses;
+}
+
 function removeRedundantClauses(clauses) {
-    const clauseMap = new Map();
+    const variableMap = new Map(); // key: sorted variables without signs
+
+    // Build the variable map
+    for (const clause of clauses) {
+        const variables = clause.map(v => v.replace('-', '')).sort();
+        const key = variables.join(' ');
+        if (!variableMap.has(key)) {
+            variableMap.set(key, []);
+        }
+        variableMap.get(key).push(clause);
+    }
+
     const clausesToRemove = new Set();
 
-    for (const clause of clauses) {
-        const key = clause.map(clean).sort().join(' ');
-        if (!clauseMap.has(key)) {
-            clauseMap.set(key, clause);
-        } else {
-            const existingClause = clauseMap.get(key);
-            const diff = clause.filter(v => !existingClause.includes(v));
-            if (diff.length === 1) {
-                const combined = removeVariable(clause, diff[0]);
-                if (combined.length > 0) {
-                    clausesToRemove.add(clause);
-                    clausesToRemove.add(existingClause);
-                    clauses.push(combined);
-                } else {
-                    console.log('empty clause probably unsatisfiable');
+    // For each group of clauses with the same variables
+    for (const [key, group] of variableMap.entries()) {
+        // Compare each pair in the group
+        for (let i = 0; i < group.length; i++) {
+            const clauseA = group[i];
+            const mapA = {};
+            for (const lit of clauseA) {
+                const varName = lit.replace('-', '');
+                mapA[varName] = lit;
+            }
+            for (let j = i + 1; j < group.length; j++) {
+                const clauseB = group[j];
+                const mapB = {};
+                for (const lit of clauseB) {
+                    const varName = lit.replace('-', '');
+                    mapB[varName] = lit;
+                }
+                let differences = 0;
+                let differingVar = null;
+                for (const varName of Object.keys(mapA)) {
+                    const litA = mapA[varName];
+                    const litB = mapB[varName];
+                    if (litA !== litB) {
+                        if (litA === '-' + litB || '-' + litA === litB) {
+                            differences++;
+                            differingVar = varName;
+                        } else {
+                            differences = 2; // More than one difference or literals not complements
+                            break;
+                        }
+                    }
+                }
+                if (differences === 1) {
+                    // Clauses differ by exactly one literal which is complemented
+                    const combined = clauseA.filter(v => v.replace('-', '') !== differingVar);
+                    if (combined.length > 0) {
+                        clausesToRemove.add(clauseA);
+                        clausesToRemove.add(clauseB);
+                        clauses.push(combined);
+                    } else {
+                        console.log('Empty clause detected, possibly unsatisfiable');
+                    }
                 }
             }
         }
@@ -567,6 +825,10 @@ function* makePermutation(arr) {
         }
         if(subset.length > 0) yield subset.join('');
     }
+}
+
+function saveToDimacs(clauses){
+    fs.writeFileSync(__dirname+'/output.dimacs',clausesToDimacs(clauses))
 }
 
 main()
