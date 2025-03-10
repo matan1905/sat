@@ -14,7 +14,10 @@ function main(){
     // console.log(clausesToDimacs((clauses)))
 }
 
-
+// Removes a single variable from the clauses using the fact that if we have (a x)(a' y) then (x y)
+// for example if we have F = (a x)(a' y)(b c) then we can seperate to positive form, negative form and neither
+// then we can take all the positive and add to all the negative and finally merge back => (x y)(b c)
+// this is unsat when there is an empty clause being generated.
 function VarOrVarNot(clauses){
     // clauses = optimize(clauses)
     // remove duplicates extreamly fast
