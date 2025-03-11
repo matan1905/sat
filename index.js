@@ -8,11 +8,184 @@ function main(){
         return a.replace('-','').localeCompare(b.replace('-',''))
     }).slice(1))
 
-    console.log(clauses.length)
-    clauses = optimize(clauses)
-    console.log(clauses.length)
-    // console.log(clausesToDimacs((clauses)))
+    let firstLen = clauses.length
+    let lastLen = clauses.length
+    do {
+        firstLen = clauses.length
+        clauses = optimize(clauses)
+        const ps2 = pseudoSat2(clauses)
+        if(ps2.finalAssignments.length > 0){
+            for (let assign of ps2.finalAssignments) {
+                clauses = setVariable(clauses,clean(assign),!isNeg(assign))
+            }
+        }
+        lastLen = clauses.length
+    } while (lastLen !== firstLen)
+    console.log(clauses)
 }
+
+// like var or not but instead of merging the vars it keeps them (a b c)(a y z)(...) => ((b c) | (y z))(...)
+function pseudoSat2(clauses) {
+    let stack = [clauses]; // Stack to simulate recursion
+    let result = [];
+    const finalAssignments = []
+
+    function optimizeClauses(result, currentClauses) {
+        const assignments = new Set(); // Track all assigned values
+
+        while (true) {
+            let newAssignments = []; // Stores newly discovered assignments
+
+            // Process the result for direct assignments
+            if (result.length > 0) {
+                const newResult = [];
+                for (let i = 0; i < result.length; i++) {
+                    let [part1, part2] = result[i];
+
+                    const isPart1False = part1.length === 0 || part1.some(x => x.length === 0);
+                    const isPart2False = part2.length === 0 || part2.some(x => x.length === 0);
+
+                    if (isPart1False && !isPart2False) {
+                        if (part2.every(x => x.length === 1)) {
+                            finalAssignments.push(part2[0][0]);
+                            newAssignments.push(part2[0][0]); // Collect assignment
+                            continue; // Do not push to currentClauses
+                        }
+                        currentClauses.push(...part2);
+                        continue;
+                    } else if (isPart2False && !isPart1False) {
+                        if (part1.every(x => x.length === 1)) {
+                            newAssignments.push(part1[0][0]); // Collect assignment
+                            finalAssignments.push(part1[0][0]); // Collect assignment
+                            continue; // Do not push to currentClauses
+                        }
+                        currentClauses.push(...part1);
+                        continue;
+                    } else if (isPart1False && isPart2False) {
+                        throw "unsat"
+                    }
+
+                    newResult.push([part1, part2]);
+                }
+                result = newResult;
+            }
+
+            // **Check for unit clauses in `currentClauses`**
+            let remainingClauses = [];
+            for (let clause of currentClauses) {
+                if (clause.length === 1) {
+                    let unit = clause[0]; // Single literal to be assigned
+                    if (!assignments.has(unit)) {
+                        console.log("assign", [unit]);
+                        newAssignments.push(unit);
+                        finalAssignments.push(unit);
+                    }
+                } else {
+                    remainingClauses.push(clause);
+                }
+            }
+            currentClauses = remainingClauses; // Remove identified unit clauses
+
+            // **If no new assignments, break the loop**
+            if (newAssignments.length === 0) break;
+
+            // **Process assignments and simplify**
+            for (let assigned of newAssignments) {
+                let negAssigned = assigned.startsWith('-') ? assigned.slice(1) : `-${assigned}`;
+
+                if (assignments.has(negAssigned)) {
+                    throw new Error("UNSAT"); // Conflict detected
+                }
+
+                assignments.add(assigned);
+
+                // Remove satisfied clauses & unit propping removals
+                currentClauses = currentClauses
+                    .filter(clause => !clause.includes(assigned)) // Remove satisfied clauses
+                    .map(clause => clause.filter(lit => lit !== negAssigned)); // Remove negations from remaining clauses
+
+                // Apply assignment to `result` **properly**
+                result = result.map(([p1, p2]) => [
+                    p1.filter(clause => !clause.includes(assigned)).map(clause => clause.filter(lit => lit !== negAssigned)),
+                    p2.filter(clause => !clause.includes(assigned)).map(clause => clause.filter(lit => lit !== negAssigned))
+                ]);
+
+            }
+
+            // **Restart loop to propagate assignments**
+        }
+        return {result,currentClauses};
+    }
+    while (stack.length > 0) {
+        let currentClauses = stack.pop();
+        if (currentClauses.length === 0) continue; // Skip empty sets
+
+        // First check for assignments
+        // const assign = currentClauses.find(clause=> clause.length === 1);
+        // if(assign){
+        //     assigments[clean(assign[0])] = sign(assign[0]);
+        //     console.log("@",assigments)
+        //     break;
+        // }
+
+        // Count frequency of each variable (ignoring signs)
+        let varCount = new Map();
+        currentClauses.forEach(clause => {
+            clause.forEach(variable => {
+                let plainVar = variable.replace('-', '');
+                varCount.set(plainVar, (varCount.get(plainVar) || 0) + 1);
+            });
+        });
+
+        if (varCount.size === 0) continue; // No more variables left to process
+
+        // Find the most used variable
+        let mostUsedVar = [...varCount.entries()].reduce((a, b) => b[1] > a[1] ? b : a)[0];
+
+        let f1 = [], f2 = [], f3 = [];
+
+        // Partition clauses
+        currentClauses.forEach(clause => {
+            if (clause.includes(mostUsedVar)) {
+                f1.push(clause.filter(v => v !== mostUsedVar)); // Remove positive occurrence
+            } else if (clause.includes('-' + mostUsedVar)) {
+                f2.push(clause.filter(v => v !== '-' + mostUsedVar)); // Remove negative occurrence
+            } else {
+                f3.push(clause); // Clause does not contain the variable
+            }
+        });
+
+
+
+        // Merge f1 or f2 into f3 if the other is empty
+        // if (f1.length === 0 && f2.length > 0) {
+        //     f3.push(...f2);
+        //     f2 = [];
+        // } else if (f2.length === 0 && f1.length > 0) {
+        //     f3.push(...f1);
+        //     f1 = [];
+        // }
+
+        // Append [[f1, f2]] if they still exist
+        if (f1.length > 0 || f2.length > 0) {
+            result.push([f1, f2]);
+        }
+
+        const optimized = optimizeClauses(result,f3)
+        result = optimized.result
+        f3 = optimized.currentClauses
+
+        // Push optimized f3 to stack for further processing
+        if (f3.length > 0) {
+            stack.push(f3); // Apply optimization before adding to stack
+        }
+    }
+
+
+    return {result,finalAssignments};
+}
+
+
 
 // Removes a single variable from the clauses using the fact that if we have (a x)(a' y) then (x y)
 // for example if we have F = (a x)(a' y)(b c) then we can seperate to positive form, negative form and neither
@@ -631,7 +804,7 @@ function optimizeTwoVariableCases(clauses) {
         const negVarIdx = varIdx + 1;
         if (sccMap[varIdx] === sccMap[negVarIdx]) {
             console.log('Unsatisfiable due to variable:', indexToVar[i]);
-            return [true, 'Unsatisfiable'];
+           throw 'Unsatisfiable'
         }
     }
 
